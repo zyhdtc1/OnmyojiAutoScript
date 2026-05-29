@@ -3,6 +3,9 @@
 # github https://github.com/runhey
 import time
 import re
+import os
+import numpy as np
+import cv2
 from cached_property import cached_property
 
 from tasks.base_task import BaseTask
@@ -168,7 +171,7 @@ class ScriptTask(GeneralBattle, GameUi, SwitchSoul, RealmRaidAssets):
                 logger.info(f'Current count {self.current_count}, max count {con.raid_config.number_attack}')
                 break
             # ----------------------------------------开始进攻
-            medal, index = self.find_one(False)
+            medal, index, remains = self.find_one(False)
             if not medal and not index:
                 # 已经没有可以挑战的了，只能刷新
                 if con.raid_config.when_attack_fail == WhenAttackFail.CONTINUE:
@@ -189,9 +192,10 @@ class ScriptTask(GeneralBattle, GameUi, SwitchSoul, RealmRaidAssets):
                     break
             # 判断是不是左上角第一个
             lock_before = con.general_battle_config.lock_team_enable
-            if index == 1:
-                logger.info('Now is the first one')
-                if con.raid_config.exit_four:
+            if remains == 1:
+                logger.info('Now is the last one')
+                file="./tasks/RealmRaid/back4.txt"
+                if con.raid_config.exit_four and self.read_back4_record_toggle(file):
                     logger.info('Exit four enable')
                     self.fire(index)
                     self.run_general_battle_back(con.general_battle_config, exit_four=True)
@@ -233,19 +237,35 @@ class ScriptTask(GeneralBattle, GameUi, SwitchSoul, RealmRaidAssets):
                 logger.info('Battle lost and exit')
                 break
 
-
         self.ui_click(self.I_BACK_RED, self.I_CHECK_EXPLORATION)
         self.ui_get_current_page()
         self.ui_goto(page_main)
         self.set_next_run(task='RealmRaid', success=success, finish=True)
         raise TaskEnd
 
+    #十八退四
+    def read_back4_record_toggle(self, file: str) -> bool:
+        if not os.path.exists(file):
+            logger.warning(f' file does dot exist: {file}')
+            return True
+        with open(file, "r") as f:
+            content = f.read().strip()
+        # 翻转
+        if content == "true":
+            new_content = "false"
+            ret = True
+        elif content == "false":
+            new_content = "true"
+            ret = False
+        else:
+            logger.warning(f'file content error {content}')
+            new_content = "false"
+            ret = True
+        # 写回文件
+        with open(file, "w") as f:
+            f.write(new_content)
 
-
-
-
-
-
+        return ret
 
     # ----------------------------------------------------------------------------------------------------------------------
     # 2023.7.21 改版个人突破
@@ -344,6 +364,41 @@ class ScriptTask(GeneralBattle, GameUi, SwitchSoul, RealmRaidAssets):
         return [self.C_PARTITION_1, self.C_PARTITION_2, self.C_PARTITION_3, self.C_PARTITION_4, self.C_PARTITION_5,
                 self.C_PARTITION_6, self.C_PARTITION_7, self.C_PARTITION_8, self.C_PARTITION_9]
 
+    def remove_overlap(self, image_list, threshold=0.50):
+        def overlap(a, b):
+            _, _, (x1, y1, w1, h1) = a
+            _, _, (x2, y2, w2, h2) = b
+
+            xi1 = max(x1, x2)
+            yi1 = max(y1, y2)
+            xi2 = min(x1 + w1, x2 + w2)
+            yi2 = min(y1 + h1, y2 + h2)
+
+            if xi2 <= xi1 or yi2 <= yi1:
+                return 0
+
+            inter = (xi2 - xi1) * (yi2 - yi1)
+            area1 = w1 * h1
+            area2 = w2 * h2
+
+            return inter / min(area1, area2)
+
+        # 按 score 排序
+        image_list = sorted(image_list, key=lambda x: x[1], reverse=True)
+
+        result = []
+
+        for item in image_list:
+            keep = True
+            for r in result:
+                if overlap(item, r) > threshold:
+                    keep = False
+                    break
+            if keep:
+                result.append(item)
+
+        return result
+    
     def find_one(self, screenshot: bool=True) -> tuple:
         """
         找到一个可以打的，并且检查一下是不是这一个的是第几个的
@@ -370,15 +425,21 @@ class ScriptTask(GeneralBattle, GameUi, SwitchSoul, RealmRaidAssets):
         # -----------------------------------------------------
         target = self.order_medal.find_anyone(image)
         if target:
+            image_list = self.order_medal.find_everyone(image)
+            image_list = self.remove_overlap(image_list)
+            remains = len(image_list)
+            logger.info(f'remains {remains} enemies')
+        #    for item in image_list:
+        #        logger.info(f'{item}')
             center = target.front_center()
             for i, click in enumerate(self.partition):
                 x1, x2, y1, y2 = click.roi_front[0], click.roi_front[0] + click.roi_front[2], \
                                  click.roi_front[1], click.roi_front[1] + click.roi_front[3]
                 if x1 < center[0] < x2 and y1 < center[1] < y2:
                     logger.info(f'Find one medal [{target}], order is {i + 1}')
-                    return target, i + 1
+                    return target, i + 1 , remains
 
-        return None, None
+        return None, None, 0
 
     def check_medal_is_frog(self, is_activity: False, target: RuleImage, order: int) -> bool:
         """
